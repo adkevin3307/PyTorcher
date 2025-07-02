@@ -1,207 +1,299 @@
-from abc import ABC, abstractmethod
+import copy
 from time import time
-from typing import Any, Optional, Sequence, Dict, Tuple, Union, TypeVar
+from typing import Any
+from abc import ABC, abstractmethod
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.cuda as cuda
+import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard.writer import SummaryWriter
 
-from utils import ProgressBar
+from .utils import ProgressBar, Callback
 
 
 class _History:
-    def __init__(self, metrics: Sequence[str] = ['loss', 'accuracy'], additional_keys: Sequence[str] = []) -> None:
-        self.metrics = metrics
-        self.additional_keys = additional_keys
+    def __init__(self, metrics: list[str] = ['loss', 'accuracy'], additional_metrics: list[str] | None = None) -> None:
+        self.__metrics = metrics
+        self.__additional_metrics = [] if additional_metrics is None else additional_metrics
 
-        self._history = {
-            'count': [],
-            'loss': [],
-            'correct': [],
-            'accuracy': []
-        }
+        self.__history = {'count': [], 'loss': [], 'correct': [], 'accuracy': []}
 
-        for key in self.additional_keys:
-            self._history[key] = []
+        for key in self.__additional_metrics:
+            self.__history[key] = []
 
-    def __str__(self) -> str:
+    def __str__(self, prefix: str = '', precision: int = 3) -> str:
         results = []
 
-        for metric in self.metrics:
-            results.append(f'{metric}: {self._history[metric][-1]:.3f}')
+        for metric in self.__metrics:
+            results.append(f'{prefix}_{metric}: {self.__history[metric][-1]:.{precision}f}')
 
         return ', '.join(results)
 
-    def __getitem__(self, idx: int) -> Dict[str, Union[int, float]]:
+    def __getitem__(self, idx: int) -> dict[str, int | float]:
         results = {}
 
-        for metric in self.metrics:
-            results[metric] = self._history[metric][idx]
+        for metric in self.__metrics:
+            results[metric] = self.__history[metric][idx]
 
         return results
 
     def reset(self) -> None:
-        for key in self._history.keys():
-            self._history[key].clear()
+        for key in self.__history.keys():
+            self.__history[key].clear()
 
     def log(self, key: str, value: Any) -> None:
-        self._history[key].append(value)
+        self.__history[key].append(value)
 
-        if len(self._history['count']) == len(self._history['correct']) and len(self._history['count']) > len(self._history['accuracy']):
-            self._history['accuracy'].append(self._history['correct'][-1] / self._history['count'][-1])
+        if len(self.__history['count']) == len(self.__history['correct']) and len(self.__history['count']) > len(self.__history['accuracy']):
+            self.__history['accuracy'].append(self.__history['correct'][-1] / self.__history['count'][-1])
 
-    def summary(self) -> None:
-        _count = sum(self._history['count'])
+    def summary(self) -> dict[str, int | float]:
+        _count = sum(self.__history['count'])
+
         if _count == 0:
             _count = 1
 
-        _loss = sum(self._history['loss']) / len(self._history['loss'])
-        _correct = sum(self._history['correct'])
+        _loss = sum(self.__history['loss']) / len(self.__history['loss'])
+        _correct = sum(self.__history['correct'])
         _accuracy = _correct / _count
 
-        self._history['count'].append(_count)
-        self._history['loss'].append(_loss)
-        self._history['correct'].append(_correct)
-        self._history['accuracy'].append(_accuracy)
+        self.__history['count'].append(_count)
+        self.__history['loss'].append(_loss)
+        self.__history['correct'].append(_correct)
+        self.__history['accuracy'].append(_accuracy)
 
-        for key in self.additional_keys:
-            _value = sum(self._history[key]) / len(self._history[key])
-            self._history[key].append(_value)
+        for key in self.__additional_metrics:
+            _value = sum(self.__history[key]) / len(self.__history[key])
+
+            self.__history[key].append(_value)
+
+        return self[-1]
 
 
 class _BaseRunner(ABC):
     @abstractmethod
     def __init__(self) -> None:
-        self.device = torch.device('cuda' if cuda.is_available() else 'cpu')
+        self.__device = torch.device('cuda' if cuda.is_available() else 'cpu')
+
+    @property
+    def device(self) -> torch.device:
+        return self.__device
+
+    @device.setter
+    def device(self, value: str) -> None:
+        self.__device = torch.device(value)
 
     @property
     @abstractmethod
-    def weights(self) -> None:
+    def weights(self) -> dict[str, Any]:
         raise NotImplementedError('weights not implemented')
 
 
-NetBase = TypeVar('NetBase', bound=nn.Module)
-CriterionBase = TypeVar('CriterionBase', bound=nn.modules.loss._Loss)
-class ExampleRunner(_BaseRunner):
-    def __init__(self, net: NetBase, optimizer: optim.Optimizer, criterion: CriterionBase, log_dir: str = 'log') -> None:
-        super(ExampleRunner, self).__init__()
+class EarlyStop:
+    def __init__(self, monitor: str, patience: int, greater_is_better: bool = False) -> None:
+        self.__count = 0
+        self.__best = None
 
-        self.history = _History(metrics=['loss', 'accuracy'])
-        self.writer = SummaryWriter(log_dir=log_dir)
-        self.global_step = {'train': 0, 'test': 0, 'epoch': 0}
+        self.__monitor = monitor
+        self.__patience = patience
+        self.__greater_is_better = greater_is_better
 
-        self.net = net.to(self.device)
-        self.optimizer = optimizer
-        self.criterion = criterion
+    def __better(self, value: Any) -> bool:
+        if self.__greater_is_better:
+            return value > self.__best
 
-    def _step(self, x: torch.Tensor, y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = x.to(self.device)
-        y = y.to(self.device)
+        return value < self.__best
 
-        output = self.net.forward(x)
-        y_hat = torch.argmax(output, dim=-1)
+    @property
+    def best(self) -> Any:
+        return self.__best
 
-        running_loss = self.criterion.forward(output, y)
+    @property
+    def monitor(self) -> str:
+        return self.__monitor
 
-        self.history.log('count', torch.numel(y))
-        self.history.log('loss', running_loss.item())
-        self.history.log('correct', torch.sum(y_hat == y).item())
+    @property
+    def patience(self) -> int:
+        return self.__patience
+
+    def step(self, metrics: dict[str, Any]) -> None:
+        if self.__monitor not in metrics:
+            return
+
+        if self.__best is None or self.__better(metrics[self.__monitor]):
+            self.__count = 0
+            self.__best = metrics[self.__monitor]
+
+            return
+
+        self.__count += 1
+
+    def stop(self) -> bool:
+        return self.__count > self.__patience
+
+
+class Runner(_BaseRunner):
+    def __init__(self, net: nn.Module, optimizer: optim.Optimizer, criterion: nn.Module | nn.modules.loss._Loss, additional_metrics: list[str] | None = None) -> None:
+        super(Runner, self).__init__()
+
+        self.__history = _History(metrics=['loss'] + ([] if additional_metrics is None else additional_metrics), additional_metrics=additional_metrics)
+
+        self.__net = net
+        self.__optimizer = optimizer
+        self.__criterion = criterion
+
+        self.__net = self.__net.to(self.__device)
+
+    def __step(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = x.to(self.__device)
+        y = y.to(self.__device)
+
+        output = self.__net.forward(x)
+        y_hat = output
+
+        running_loss = self.__criterion.forward(output, y)
+
+        self.__history.log('count', torch.numel(y))
+        self.__history.log('correct', torch.sum(y_hat == y).item())
+
+        self.__history.log('loss', running_loss.item())
 
         return (y_hat, running_loss)
 
-    def _record(self, tag: str, info: Optional[dict] = None, updatable: bool = True) -> None:
-        _log = self.history[-1]
-
-        for key, value in _log.items():
-            self.writer.add_scalar(f'{key} / {tag}', value, global_step=self.global_step[tag])
-
-        if info is not None:
-            for key, value in info.items():
-               self.writer.add_scalar(f'{key} / {tag}', value, global_step=self.global_step[tag])
-
-        if updatable:
-            self.global_step[tag] += 1
-
-    def train(self, epochs: int, train_loader: DataLoader, valid_loader: Optional[DataLoader] = None, scheduler: Optional[optim.lr_scheduler._LRScheduler] = None) -> None:
+    def train(self, epochs: int, train_loader: DataLoader, valid_loader: DataLoader | None = None, earlystop: EarlyStop | None = None, callbacks: list[Callback] | None = None) -> None:
         epoch_length = len(str(epochs))
 
         for epoch in range(epochs):
-            self.net.train()
+            self.__net.train()
+
+            start = time()
 
             for i, (x, y) in enumerate(train_loader):
-                _, running_loss = self._step(x, y)
+                _, running_loss = self.__step(x, y)
 
-                self.optimizer.zero_grad()
+                self.__optimizer.zero_grad()
                 running_loss.backward()
-                self.optimizer.step()
+                self.__optimizer.step()
 
                 prefix = f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}'
-                postfix = str(self.history)
+                postfix = self.__history.__str__(prefix='train')
                 ProgressBar.show(prefix, postfix, i, len(train_loader))
 
-                self._record('train')
+            stop = time()
 
-            self._record('epoch', info={'LR': self.optimizer.param_groups[0]['lr']})
-            self.history.summary()
+            metrics = self.__history.summary()
 
             prefix = f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}'
-            postfix = str(self.history)
-            ProgressBar.show(prefix, postfix, len(train_loader), len(train_loader), newline=True)
+            postfix = self.__history.__str__(prefix='train') + f' ({(stop - start):.3f} secs)'
+            ProgressBar.show(prefix, postfix, len(train_loader), len(train_loader), freeze=(valid_loader is not None), newline=(valid_loader is None))
 
-            self.history.reset()
+            self.__history.reset()
 
             if valid_loader:
-                self.test(valid_loader)
+                metrics = self.validate(valid_loader)
 
-            if scheduler:
-                scheduler.step()
+            if earlystop:
+                earlystop.step(metrics)
 
-    @torch.no_grad()
-    def test(self, test_loader: DataLoader) -> None:
-        self.net.eval()
+                if earlystop.stop():
+                    print(f'Stop by Early Stopping check with metric `{earlystop.monitor}` (best: {earlystop.best}, patience: {earlystop.patience})')
 
-        for i, (x, y) in enumerate(test_loader):
-            _ = self._step(x, y)
+                    break
 
-            prefix = 'Test'
-            postfix = str(self.history)
-            ProgressBar.show(prefix, postfix, i, len(test_loader))
+            exclude = ['_', 'self', 'callbacks', 'callback', 'exclude']
 
-            self._record('test')
-
-        self.history.summary()
-
-        prefix = 'Test'
-        postfix = str(self.history)
-        ProgressBar.show(prefix, postfix, len(test_loader), len(test_loader), newline=True)
-
-        self.history.reset()
+            if callbacks is not None:
+                for callback in callbacks:
+                    if (epoch + 1) % callback.interval == 0:
+                        callback(**{key: value for key, value in locals().items() if key not in exclude})
 
     @torch.no_grad()
-    def evaluate(self, data_loader: DataLoader) -> torch.Tensor:
-        self.net.eval()
+    def validate(self, valid_loader: DataLoader) -> dict[str, int | float]:
+        self.__net.eval()
 
         start = time()
 
-        y_hat = []
+        for i, (x, y) in enumerate(valid_loader):
+            _ = self.__step(x, y)
 
-        for i, (x, ) in enumerate(data_loader):
-            output, _ = self._step(x, torch.zeros(1))
-            y_hat.append(output)
+            prefix = ''
+            postfix = self.__history.__str__(prefix='valid')
+            ProgressBar.show(prefix, postfix, i, len(valid_loader), show_progress=False)
+
+        stop = time()
+
+        metrics = self.__history.summary()
+
+        prefix = ''
+        postfix = self.__history.__str__(prefix='valid') + f' ({(stop - start):.3f} secs)'
+        ProgressBar.show(prefix, postfix, len(valid_loader), len(valid_loader), show_progress=False, newline=True)
+
+        self.__history.reset()
+
+        return metrics
+
+    @torch.no_grad()
+    def test(self, test_loader: DataLoader) -> dict[str, int | float]:
+        self.__net.eval()
+
+        for i, (x, y) in enumerate(test_loader):
+            _ = self.__step(x, y)
+
+            prefix = 'Test'
+            postfix = self.__history.__str__(prefix='test')
+            ProgressBar.show(prefix, postfix, i, len(test_loader))
+
+        metrics = self.__history.summary()
+
+        prefix = 'Test'
+        postfix = self.__history.__str__(prefix='test')
+        ProgressBar.show(prefix, postfix, len(test_loader), len(test_loader), newline=True)
+
+        self.__history.reset()
+
+        return metrics
+
+    @torch.no_grad()
+    def evaluate(self, data_loader: DataLoader) -> tuple[torch.Tensor, ...]:
+        self.__net.eval()
+
+        start = time()
+
+        ys = []
+        y_hats = []
+
+        for i, (x, y) in enumerate(data_loader):
+            output, _ = self.__step(x, y)
+            y_hat = output
+
+            ys.append(y)
+            y_hats.append(y_hat)
 
             ProgressBar.show('Evaluate', '', i, len(data_loader))
 
-        y_hat = torch.concat(y_hat, dim=0).cpu()
+        y = torch.concat(ys, dim=0).cpu()
+        y_hat = torch.concat(y_hats, dim=0).cpu()
 
         stop = time()
 
         ProgressBar.show('Evaluate', f'elapsed time: {(stop - start):.3f}', len(data_loader), len(data_loader), newline=True)
 
+        self.__history.reset()
+
+        return y, y_hat
+
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        self.__net.eval()
+
+        x = x.to(self.__device)
+        output = self.__net.forward(x)
+        y_hat = output.cpu()
+
         return y_hat
 
     @property
     @torch.no_grad()
-    def weights(self) -> Dict[str, Any]:
-        return {self.net.__class__.__name__: self.net}
+    def weights(self) -> dict[str, Any]:
+        return {'net': copy.deepcopy(self.__net).cpu()}
