@@ -1,6 +1,6 @@
 import os
+import enum
 import random
-import logging
 import numpy as np
 from typing import Any, Callable
 
@@ -8,9 +8,6 @@ import torch
 import torch.cuda as cuda
 import torch.backends.cudnn as cudnn
 from torch.utils.data import Dataset, DataLoader
-
-
-logger = logging.getLogger('PyTorch-Runner')
 
 
 def fix_seed(seed: int = 0) -> None:
@@ -32,12 +29,18 @@ def load_data(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: int
     return data_loader
 
 
+class Verbosity(enum.Enum):
+    NONE = 0
+    FINAL = 1
+    PROGRESS = 2
+
+
 class ProgressBar:
     __buffer = ''
     __last_length = 0
 
     @staticmethod
-    def show(prefix: str, postfix: str, current: int, total: int, show_progress: bool = True, newline: bool = False, freeze: bool = False) -> None:
+    def show(prefix: str, postfix: str, current: int, total: int, show_progress: bool = True, freeze: bool = False, newline: bool = False) -> None:
         progress = (current + 1) / total
         if current == total:
             progress = 1
@@ -45,21 +48,21 @@ class ProgressBar:
         current_progress = progress * 100
         progress_bar = '=' * int(progress * 20)
 
-        message = ''
+        message = []
 
         if len(prefix) > 0:
-            message += f'{prefix}, '
+            message.append(f'{prefix}')
 
         if show_progress:
-            message += f'[{progress_bar:<20}]'
-
-            if not newline:
-                message += f' {current_progress:6.2f}%'
+            message.append(f'[{progress_bar:<20}] {current_progress:6.2f}%')
 
         if len(postfix) > 0:
-            message += f', {postfix}'
+            message.append(f'{postfix}')
 
-        message = ProgressBar.__buffer + message
+        if len(ProgressBar.__buffer) > 0:
+            message = [ProgressBar.__buffer] + message
+
+        message = ', '.join(message)
 
         print(f'\r{" " * ProgressBar.__last_length}', end='', flush=True)
         print(f'\r{message}', end='', flush=True)
@@ -70,12 +73,53 @@ class ProgressBar:
         if newline:
             print()
 
-            logger.info(message)
-
             ProgressBar.__buffer = ''
             ProgressBar.__last_length = 0
         else:
             ProgressBar.__last_length = len(message) + 1
+
+
+class EarlyStop:
+    def __init__(self, monitor: str, patience: int, greater_is_better: bool = False) -> None:
+        self.__count = 0
+        self.__best = None
+
+        self.__monitor = monitor
+        self.__patience = patience
+        self.__greater_is_better = greater_is_better
+
+    def __better(self, value: Any) -> bool:
+        if self.__greater_is_better:
+            return value > self.__best
+
+        return value < self.__best
+
+    @property
+    def best(self) -> Any:
+        return self.__best
+
+    @property
+    def monitor(self) -> str:
+        return self.__monitor
+
+    @property
+    def patience(self) -> int:
+        return self.__patience
+
+    def step(self, metrics: dict[str, Any]) -> None:
+        if self.__monitor not in metrics:
+            return
+
+        if self.__best is None or self.__better(metrics[self.__monitor]):
+            self.__count = 0
+            self.__best = metrics[self.__monitor]
+
+            return
+
+        self.__count += 1
+
+    def stop(self) -> bool:
+        return self.__count > self.__patience
 
 
 class Callback:
