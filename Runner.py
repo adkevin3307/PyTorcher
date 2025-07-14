@@ -71,33 +71,51 @@ class Runner(_BaseRunner):
     def __init__(self, net: nn.Module, optimizer: optim.Optimizer, criterion: nn.Module | nn.modules.loss._Loss, categorical: bool = True, verbose: Verbosity = Verbosity.PROGRESS, elapsed_time: bool = True) -> None:
         super(Runner, self).__init__()
 
+        self.__net = net
+        self.__optimizer = optimizer
+        self.__criterion = criterion
+
         self.__categorical = categorical
+
         self.__verbose = verbose
         self.__elapsed_time = elapsed_time
 
         self.__history = _History(metrics=['loss'] + (['accuracy'] if self.__categorical else []))
 
-        self.__net = net
-        self.__optimizer = optimizer
-        self.__criterion = criterion
-
         self.__net = self.__net.to(self.device)
 
-    def __step(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def __forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x = x.to(self.device)
-        y = y.to(self.device)
 
         output = self.__net.forward(x)
-        y_hat = output
+        y_hat = torch.argmax(output, dim=-1) if self.__categorical else output
 
-        running_loss = self.__criterion.forward(output, y)
+        return output, y_hat
 
-        self.__history.log('loss', running_loss.item())
+    def __metrics(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> list[torch.Tensor]:
+        output = output.to(self.device)
+        y_hat = y_hat.to(self.device)
+        y = y.to(self.device)
 
-        if self.__categorical:
-            self.__history.log('accuracy', torch.sum(y_hat == y).item() / torch.numel(y))
+        try:
+            metrics = self.metrics(output, y_hat, y)
 
-        return (y_hat, running_loss)
+        except NotImplementedError:
+            metrics = []
+
+            running_loss = self.__criterion.forward(output, y)
+            self.__history.log('loss', running_loss.item())
+            metrics.append(running_loss)
+
+            if self.__categorical:
+                running_accuracy = torch.sum(y_hat == y) / torch.numel(y)
+                self.__history.log('accuracy', running_accuracy.item())
+                metrics.append(running_accuracy)
+
+        return metrics
+
+    def metrics(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> list[torch.Tensor]:
+        raise NotImplementedError('metrics not implemented')
 
     def train(self, epochs: int, train_loader: DataLoader, valid_loader: DataLoader | None = None, earlystop: EarlyStop | None = None, callbacks: list[Callback] | None = None) -> None:
         epoch_length = len(str(epochs))
@@ -108,7 +126,8 @@ class Runner(_BaseRunner):
             start = time()
 
             for i, (x, y) in enumerate(train_loader):
-                _, running_loss = self.__step(x, y)
+                output, y_hat = self.__forward(x)
+                running_loss, *_ = self.__metrics(output, y_hat, y)
 
                 self.__optimizer.zero_grad()
                 running_loss.backward()
@@ -146,7 +165,7 @@ class Runner(_BaseRunner):
             if callbacks is not None:
                 for callback in callbacks:
                     if (epoch + 1) % callback.interval == 0:
-                        callback(**{key: value for key, value in locals().items() if key not in exclude})
+                        callback(**{key: value for key, value in locals().items() if key not in exclude} | {'runner': self})
 
     @torch.no_grad()
     def validate(self, valid_loader: DataLoader) -> dict[str, int | float]:
@@ -155,7 +174,8 @@ class Runner(_BaseRunner):
         start = time()
 
         for i, (x, y) in enumerate(valid_loader):
-            _ = self.__step(x, y)
+            output, y_hat = self.__forward(x)
+            _ = self.__metrics(output, y_hat, y)
 
             if self.__verbose in [Verbosity.PROGRESS]:
                 prefix = ''
@@ -182,7 +202,8 @@ class Runner(_BaseRunner):
         start = time()
 
         for i, (x, y) in enumerate(test_loader):
-            _ = self.__step(x, y)
+            output, y_hat = self.__forward(x)
+            _ = self.__metrics(output, y_hat, y)
 
             if self.__verbose in [Verbosity.PROGRESS]:
                 prefix = 'Test'
@@ -212,8 +233,7 @@ class Runner(_BaseRunner):
         y_hats = []
 
         for i, (x, y) in enumerate(data_loader):
-            output, _ = self.__step(x, y)
-            y_hat = output
+            _, y_hat = self.__forward(x)
 
             ys.append(y)
             y_hats.append(y_hat)
@@ -241,9 +261,17 @@ class Runner(_BaseRunner):
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         self.__net.eval()
 
-        x = x.to(self.device)
-        output = self.__net.forward(x)
-        y_hat = output.cpu()
+        start = time()
+
+        _, y_hat = self.__forward(x)
+        y_hat = y_hat.cpu()
+
+        stop = time()
+
+        if self.__verbose in [Verbosity.FINAL, Verbosity.PROGRESS]:
+            prefix = 'Predict'
+            postfix = f'elapsed time: {(stop - start):.3f}' if self.__elapsed_time else ''
+            ProgressBar.show(prefix, postfix, 1, 1, show_progress=(self.__verbose == Verbosity.PROGRESS), newline=True)
 
         return y_hat
 
@@ -251,3 +279,23 @@ class Runner(_BaseRunner):
     @torch.no_grad()
     def weights(self) -> dict[str, Any]:
         return {'net': copy.deepcopy(self.__net).cpu()}
+
+    @property
+    @torch.no_grad()
+    def optimizer(self) -> optim.Optimizer:
+        return self.__optimizer
+
+    @optimizer.setter
+    @torch.no_grad()
+    def optimizer(self, value: optim.Optimizer) -> None:
+        self.__optimizer = value
+
+    @property
+    @torch.no_grad()
+    def criterion(self) -> nn.Module | nn.modules.loss._Loss:
+        return self.__criterion
+
+    @criterion.setter
+    @torch.no_grad()
+    def criterion(self, value: nn.Module | nn.modules.loss._Loss) -> None:
+        self.__criterion = value
