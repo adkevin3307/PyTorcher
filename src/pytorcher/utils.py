@@ -31,19 +31,16 @@ def load_data(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: int
 
 class Verbosity(enum.Enum):
     NONE = 0
-    FINAL = 1
-    PROGRESS = 2
+    DETAIL = 1
+    GENERAL = 2
 
 
 class ProgressBar:
-    __buffer = ''
-    __last_length = 0
+    __length = 0
 
     @staticmethod
-    def show(prefix: str, postfix: str, current: int, total: int, show_progress: bool = True, freeze: bool = False, newline: bool = False) -> None:
-        progress = (current + 1) / total
-        if current == total:
-            progress = 1
+    def show(prefix: str, postfix: str, current: int, total: int, show_progress: bool = True, newline: bool = False) -> str:
+        progress = 1 if current == total else ((current + 1) / total)
 
         current_progress = progress * 100
         progress_bar = '=' * int(progress * 20)
@@ -59,24 +56,19 @@ class ProgressBar:
         if len(postfix) > 0:
             message.append(f'{postfix}')
 
-        if len(ProgressBar.__buffer) > 0:
-            message = [ProgressBar.__buffer] + message
-
         message = ', '.join(message)
 
-        print(f'\r{" " * ProgressBar.__last_length}', end='', flush=True)
+        print(f'\r{" " * ProgressBar.__length}', end='', flush=True)
         print(f'\r{message}', end='', flush=True)
-
-        if freeze:
-            ProgressBar.__buffer = message
 
         if newline:
             print()
 
-            ProgressBar.__buffer = ''
-            ProgressBar.__last_length = 0
+            ProgressBar.__length = 0
         else:
-            ProgressBar.__last_length = len(message) + 1
+            ProgressBar.__length = len(message) + 1
+
+        return message
 
 
 class EarlyStop:
@@ -123,9 +115,10 @@ class EarlyStop:
 
 
 class Callback:
-    def __init__(self, function: Callable, interval: int, *args, **kwargs) -> None:
+    def __init__(self, function: Callable, interval: int, name: str | None = None, *args, **kwargs) -> None:
         self.__function = function
         self.__interval = interval
+        self.__name = name
 
         self.__args = args
         self.__kwargs = kwargs
@@ -136,3 +129,7 @@ class Callback:
     @property
     def interval(self) -> int:
         return self.__interval
+
+    @property
+    def name(self) -> str | None:
+        return self.__name
