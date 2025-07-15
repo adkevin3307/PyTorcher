@@ -2,17 +2,8 @@ import os
 
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
 
 from .utils import EarlyStop
-
-
-def validate_callback(data_loader: DataLoader, *args, **kwargs) -> dict[str, int | float]:
-    runner = kwargs['runner']
-
-    metrics = runner.validate(data_loader)
-
-    return metrics
 
 
 def scheduler_callback(scheduler: optim.lr_scheduler.LRScheduler, *args, **kwargs) -> None:

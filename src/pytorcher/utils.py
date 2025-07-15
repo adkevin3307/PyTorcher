@@ -35,42 +35,6 @@ class Verbosity(enum.Enum):
     GENERAL = 2
 
 
-class ProgressBar:
-    __length = 0
-
-    @staticmethod
-    def show(prefix: str, postfix: str, current: int, total: int, show_progress: bool = True, newline: bool = False) -> str:
-        progress = 1 if current == total else ((current + 1) / total)
-
-        current_progress = progress * 100
-        progress_bar = '=' * int(progress * 20)
-
-        message = []
-
-        if len(prefix) > 0:
-            message.append(f'{prefix}')
-
-        if show_progress:
-            message.append(f'[{progress_bar:<20}] {current_progress:6.2f}%')
-
-        if len(postfix) > 0:
-            message.append(f'{postfix}')
-
-        message = ', '.join(message)
-
-        print(f'\r{" " * ProgressBar.__length}', end='', flush=True)
-        print(f'\r{message}', end='', flush=True)
-
-        if newline:
-            print()
-
-            ProgressBar.__length = 0
-        else:
-            ProgressBar.__length = len(message) + 1
-
-        return message
-
-
 class EarlyStop:
     def __init__(self, monitor: str, patience: int, greater_is_better: bool = False) -> None:
         self.__count = 0
@@ -125,6 +89,10 @@ class Callback:
 
     def __call__(self, *args, **kwargs) -> Any:
         return self.__function(*(self.__args + args), **(self.__kwargs | kwargs))
+
+    @property
+    def function(self) -> Callable:
+        return self.__function
 
     @property
     def interval(self) -> int:

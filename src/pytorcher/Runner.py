@@ -1,6 +1,7 @@
 import copy
-from time import time
+from tqdm import tqdm
 from typing import Any
+from functools import partial
 from abc import ABC, abstractmethod
 
 import torch
@@ -9,7 +10,7 @@ import torch.cuda as cuda
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from .utils import Verbosity, ProgressBar, Callback
+from .utils import Verbosity, Callback
 
 
 class _History:
@@ -18,13 +19,8 @@ class _History:
 
         self.__history = {metric: [] for metric in self.__metrics}
 
-    def __str__(self, prefix: str = '', precision: int = 3) -> str:
-        results = []
-
-        for metric in self.__metrics:
-            results.append(f'{prefix}_{metric}: {self.__history[metric][-1]:.{precision}f}')
-
-        return ', '.join(results)
+    def __str__(self) -> str:
+        return self.convert(self.__getitem__(-1), prefix='', precision=3)
 
     def __getitem__(self, idx: int) -> dict[str, int | float]:
         results = {}
@@ -33,6 +29,9 @@ class _History:
             results[metric] = self.__history[metric][idx]
 
         return results
+
+    def convert(self, metrics: dict[str, int | float], prefix: str = '', precision: int = 3) -> str:
+        return ', '.join([f'{f"{prefix}_" if len(prefix) > 0 else ""}{key}: {value:.{precision}f}' for key, value in metrics.items()])
 
     def reset(self) -> None:
         for key in self.__history.keys():
@@ -78,10 +77,11 @@ class Runner(_BaseRunner):
         self.__categorical = categorical
 
         self.__verbose = verbose
-        self.__elapsed_time = elapsed_time
 
         self.__metrics = ['loss'] + (['accuracy'] if self.__categorical else [])
         self.__history = _History(metrics=self.__metrics)
+
+        self.__progress_bar = partial(tqdm, ascii=' =', bar_format='{desc}, [{bar:20}] {percentage:6.2f}%{postfix}' + (' ({elapsed_s:.3f} secs)' if elapsed_time else ''))
 
         self.__net = self.__net.to(self.device)
 
@@ -120,17 +120,17 @@ class Runner(_BaseRunner):
     def step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, ...]:
         raise NotImplementedError('step not implemented')
 
-    def train(self, epochs: int, data_loader: DataLoader, callbacks: list[Callback] | None = None) -> None:
+    def train(self, epochs: int, data_loader: DataLoader, valid_loader: DataLoader | None = None, callbacks: list[Callback] | None = None) -> None:
         epoch_length = len(str(epochs))
-
-        start = time()
+        epoch_progress_bar = self.__progress_bar(total=epochs, desc=f'Epochs: {0:>{epoch_length}} / {epochs}', position=0, disable=(self.__verbose != Verbosity.GENERAL))
 
         for epoch in range(epochs):
             self.__net.train()
 
-            _start = time()
+            epoch_progress_bar.set_description_str(f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}')
+            batch_progress_bar = self.__progress_bar(total=len(data_loader), desc=f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}', position=0, disable=(self.__verbose != Verbosity.DETAIL))
 
-            for i, (x, y) in enumerate(data_loader):
+            for x, y in data_loader:
                 output, y_hat = self.__forward(x)
                 running_loss, *_ = self.__step(output, y_hat, y)
 
@@ -138,33 +138,31 @@ class Runner(_BaseRunner):
                 running_loss.backward()
                 self.__optimizer.step()
 
-                match self.__verbose:
-                    case Verbosity.DETAIL:
-                        prefix = f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}'
-                        postfix = self.__history.__str__(prefix='train')
-                        ProgressBar.show(prefix, postfix, i, len(data_loader))
-
-                    case _:
-                        pass
-
-            _stop = time()
+                batch_progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
+                batch_progress_bar.update()
 
             metrics = self.__history.summary()
-
-            prefix = f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}'
-            postfix = self.__history.__str__(prefix='train') + (f' ({(_stop - _start):.3f} secs)' if self.__elapsed_time else '')
-
-            match self.__verbose:
-                case Verbosity.DETAIL:
-                    ProgressBar.show(prefix, postfix, len(data_loader), len(data_loader), newline=True)
-
-                case Verbosity.GENERAL:
-                    ProgressBar.show(prefix, postfix, epoch, epochs)
-
-                case _:
-                    pass
-
             self.__history.reset()
+
+            postfix = self.__history.convert(metrics, prefix='train')
+
+            batch_progress_bar.set_postfix_str(postfix)
+            batch_progress_bar.refresh()
+
+            epoch_progress_bar.set_postfix_str(postfix if epoch_progress_bar.disable or epoch_progress_bar.postfix is None else (postfix + epoch_progress_bar.postfix[len(postfix) :]))
+            epoch_progress_bar.refresh()
+
+            if valid_loader is not None:
+                metrics = self.validate(valid_loader)
+
+                postfix = [postfix, self.__history.convert(metrics, prefix='valid')]
+                postfix = ', '.join([element for element in postfix if len(element) > 0])
+
+                batch_progress_bar.set_postfix_str(postfix)
+                batch_progress_bar.refresh()
+
+                epoch_progress_bar.set_postfix_str(postfix)
+                epoch_progress_bar.refresh()
 
             exclude = ['_', 'self', 'callbacks', 'callback', 'exclude']
 
@@ -188,53 +186,34 @@ class Runner(_BaseRunner):
                 if stop_iteration:
                     break
 
-        stop = time()
+            epoch_progress_bar.update()
 
-        prefix = f'Epochs: {epochs} / {epochs}'
-        postfix = f' ({(stop - start):.3f} secs)' if self.__elapsed_time else ''
-
-        match self.__verbose:
-            case Verbosity.GENERAL:
-                ProgressBar.show(prefix, postfix, epochs, epochs, newline=True)
-
-            case _:
-                pass
+        epoch_progress_bar.set_description_str(f'Epochs: {epochs} / {epochs}')
+        epoch_progress_bar.set_postfix_str()
+        epoch_progress_bar.refresh()
 
     @torch.no_grad()
     def validate(self, data_loader: DataLoader) -> dict[str, int | float]:
         self.__net.eval()
 
-        start = time()
+        progress_bar = self.__progress_bar(total=len(data_loader), desc='Validate', position=1, leave=False, disable=(self.__verbose == Verbosity.NONE))
 
-        for i, (x, y) in enumerate(data_loader):
+        for x, y in data_loader:
+            import time
+
+            time.sleep(0.1)
+
             output, y_hat = self.__forward(x)
             _ = self.__step(output, y_hat, y)
 
-            prefix = 'Validate'
-            postfix = self.__history.__str__(prefix='valid')
-
-            match self.__verbose:
-                case Verbosity.DETAIL:
-                    ProgressBar.show(prefix, postfix, i, len(data_loader))
-
-                case _:
-                    pass
-
-        stop = time()
+            progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
+            progress_bar.update()
 
         metrics = self.__history.summary()
-
-        prefix = 'Validate'
-        postfix = self.__history.__str__(prefix='valid') + (f' ({(stop - start):.3f} secs)' if self.__elapsed_time else '')
-
-        match self.__verbose:
-            case Verbosity.DETAIL:
-                ProgressBar.show(prefix, postfix, len(data_loader), len(data_loader), newline=True)
-
-            case _:
-                pass
-
         self.__history.reset()
+
+        progress_bar.set_postfix_str(self.__history.convert(metrics))
+        progress_bar.refresh()
 
         return metrics
 
@@ -242,37 +221,20 @@ class Runner(_BaseRunner):
     def test(self, data_loader: DataLoader) -> dict[str, int | float]:
         self.__net.eval()
 
-        start = time()
+        progress_bar = self.__progress_bar(total=len(data_loader), desc='Test', position=0, leave=True, disable=(self.__verbose == Verbosity.NONE))
 
-        for i, (x, y) in enumerate(data_loader):
+        for x, y in data_loader:
             output, y_hat = self.__forward(x)
             _ = self.__step(output, y_hat, y)
 
-            prefix = 'Test'
-            postfix = self.__history.__str__(prefix='test')
-
-            match self.__verbose:
-                case Verbosity.DETAIL | Verbosity.GENERAL:
-                    ProgressBar.show(prefix, postfix, i, len(data_loader))
-
-                case _:
-                    pass
-
-        stop = time()
+            progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
+            progress_bar.update()
 
         metrics = self.__history.summary()
-
-        prefix = 'Test'
-        postfix = self.__history.__str__(prefix='test') + (f' ({(stop - start):.3f} secs)' if self.__elapsed_time else '')
-
-        match self.__verbose:
-            case Verbosity.DETAIL | Verbosity.GENERAL:
-                ProgressBar.show(prefix, postfix, len(data_loader), len(data_loader), show_progress=True, newline=True)
-
-            case _:
-                pass
-
         self.__history.reset()
+
+        progress_bar.set_postfix_str(self.__history.convert(metrics))
+        progress_bar.refresh()
 
         return metrics
 
@@ -280,43 +242,21 @@ class Runner(_BaseRunner):
     def evaluate(self, data_loader: DataLoader) -> tuple[torch.Tensor, ...]:
         self.__net.eval()
 
-        start = time()
+        progress_bar = self.__progress_bar(total=len(data_loader), desc='Evaluate', position=0, leave=True, disable=(self.__verbose == Verbosity.NONE))
 
         ys = []
         y_hats = []
 
-        for i, (x, y) in enumerate(data_loader):
+        for x, y in data_loader:
             _, y_hat = self.__forward(x)
 
             ys.append(y)
             y_hats.append(y_hat)
 
-            prefix = 'Evaluate'
-            postfix = ''
-
-            match self.__verbose:
-                case Verbosity.DETAIL | Verbosity.GENERAL:
-                    ProgressBar.show(prefix, postfix, i, len(data_loader))
-
-                case _:
-                    pass
+            progress_bar.update()
 
         y = torch.concat(ys, dim=0).cpu()
         y_hat = torch.concat(y_hats, dim=0).cpu()
-
-        stop = time()
-
-        prefix = 'Evaluate'
-        postfix = f'elapsed time: {(stop - start):.3f}' if self.__elapsed_time else ''
-
-        match self.__verbose:
-            case Verbosity.DETAIL | Verbosity.GENERAL:
-                ProgressBar.show(prefix, postfix, len(data_loader), len(data_loader), newline=True)
-
-            case _:
-                pass
-
-        self.__history.reset()
 
         return y, y_hat
 
@@ -324,22 +264,12 @@ class Runner(_BaseRunner):
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         self.__net.eval()
 
-        start = time()
+        progress_bar = self.__progress_bar(total=1, desc='Predict', position=0, leave=True, disable=(self.__verbose == Verbosity.NONE))
 
         _, y_hat = self.__forward(x)
         y_hat = y_hat.cpu()
 
-        stop = time()
-
-        prefix = 'Predict'
-        postfix = f'elapsed time: {(stop - start):.3f}' if self.__elapsed_time else ''
-
-        match self.__verbose:
-            case Verbosity.DETAIL | Verbosity.GENERAL:
-                ProgressBar.show(prefix, postfix, 0, 0, newline=True)
-
-            case _:
-                pass
+        progress_bar.update()
 
         return y_hat
 
