@@ -127,7 +127,6 @@ class Runner(_BaseRunner):
         for epoch in range(epochs):
             self.__net.train()
 
-            epoch_progress_bar.set_description_str(f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}')
             batch_progress_bar = self.__progress_bar(total=len(data_loader), desc=f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}', position=0, disable=(self.__verbose != Verbosity.DETAIL))
 
             for x, y in data_loader:
@@ -149,8 +148,9 @@ class Runner(_BaseRunner):
             batch_progress_bar.set_postfix_str(postfix)
             batch_progress_bar.refresh()
 
+            epoch_progress_bar.set_description_str(f'Epochs: {(epoch + 1):>{epoch_length}} / {epochs}')
             epoch_progress_bar.set_postfix_str(postfix if epoch_progress_bar.disable or epoch_progress_bar.postfix is None else (postfix + epoch_progress_bar.postfix[len(postfix) :]))
-            epoch_progress_bar.refresh()
+            epoch_progress_bar.update()
 
             if valid_loader is not None:
                 metrics = self.validate(valid_loader)
@@ -170,7 +170,7 @@ class Runner(_BaseRunner):
                 stop_iteration = False
 
                 for callback in callbacks:
-                    if (epoch + 1) % callback.interval == 0:
+                    if (epoch + 1) % callback.interval == 0 or (epoch + 1 == epochs and callback.last):
                         try:
                             retval = callback(**{key: value for key, value in locals().items() if key not in exclude} | {'runner': self})
 
@@ -185,8 +185,6 @@ class Runner(_BaseRunner):
 
                 if stop_iteration:
                     break
-
-            epoch_progress_bar.update()
 
         epoch_progress_bar.set_description_str(f'Epochs: {epochs} / {epochs}')
         epoch_progress_bar.set_postfix_str()

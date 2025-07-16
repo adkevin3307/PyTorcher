@@ -79,9 +79,10 @@ class EarlyStop:
 
 
 class Callback:
-    def __init__(self, function: Callable, interval: int, name: str | None = None, *args, **kwargs) -> None:
+    def __init__(self, function: Callable, interval: int, last: bool = False, name: str | None = None, *args, **kwargs) -> None:
         self.__function = function
         self.__interval = interval
+        self.__last = last
         self.__name = name
 
         self.__args = args
@@ -97,6 +98,10 @@ class Callback:
     @property
     def interval(self) -> int:
         return self.__interval
+
+    @property
+    def last(self) -> bool:
+        return self.__last
 
     @property
     def name(self) -> str | None:

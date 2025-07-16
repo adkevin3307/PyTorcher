@@ -13,11 +13,15 @@ def scheduler_callback(scheduler: optim.lr_scheduler.LRScheduler, *args, **kwarg
 def checkpoint_callback(tag: str = '', checkpoints: str = 'checkpoints', *args, **kwargs) -> None:
     runner = kwargs['runner']
     epoch = kwargs['epoch']
+    epochs = kwargs['epochs']
 
     folder = os.path.join(checkpoints, tag)
     os.makedirs(folder, exist_ok=True)
 
-    torch.save(runner.weights['net'].state_dict(), os.path.join(folder, 'final' if epoch is None else f'{epoch + 1}' + '.pt'))
+    torch.save(runner.weights['net'].state_dict(), os.path.join(folder, f'{epoch + 1}.pt'))
+
+    if epoch + 1 == epochs:
+        torch.save(runner.weights['net'].state_dict(), os.path.join(folder, 'final.pt'))
 
 
 def early_stop_callback(early_stop: EarlyStop, *args, **kwargs) -> None:
