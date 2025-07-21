@@ -1,7 +1,7 @@
 import copy
 from tqdm import tqdm
+from typing import Any
 from functools import partial
-from typing import Any, Literal
 from abc import ABC, abstractmethod
 
 import torch
@@ -107,7 +107,7 @@ class Runner(_BaseRunner):
 
         return output, y_hat
 
-    def __step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> dict[str, torch.Tensor]:
+    def __step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, ...]:
         output = output.to(self.device)
         y_hat = y_hat.to(self.device)
         y = y.to(self.device)
@@ -125,14 +125,10 @@ class Runner(_BaseRunner):
                 running_accuracy = torch.sum(y_hat == y) / torch.numel(y)
                 result['accuracy'] = running_accuracy
 
-        return result
+        for key, value in result.items():
+            self.__history.log(key, value.item())
 
-    def __record(self, result: dict[str, torch.Tensor], mode: Literal['train', 'validate', 'test']) -> None:
-        for metric, value in result.items():
-            self.__history.log(metric, value.item())
-
-            self.__writer.add_scalar(f'{metric}/{mode}', value.item(), self.__record_count[mode])
-            self.__record_count[mode] += 1
+        return tuple(result.values())
 
     def step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> dict[str, torch.Tensor]:
         raise NotImplementedError('step not implemented')
@@ -148,11 +144,10 @@ class Runner(_BaseRunner):
 
             for x, y in data_loader:
                 output, y_hat = self.__forward(x)
-                result = self.__step(output, y_hat, y)
-                self.__record(result, mode='train')
+                running_loss, *_ = self.__step(output, y_hat, y)
 
                 self.__optimizer.zero_grad()
-                result['loss'].backward()
+                running_loss.backward()
                 self.__optimizer.step()
 
                 batch_progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
@@ -160,6 +155,11 @@ class Runner(_BaseRunner):
 
             metrics = self.__history.summary()
             self.__history.reset()
+
+            for metric, value in metrics.items():
+                self.__writer.add_scalar(f'{metric}/train', value, self.__record_count['train'])
+
+            self.__record_count['train'] += 1
 
             postfix = self.__history.convert(metrics, prefix='train')
 
@@ -215,19 +215,19 @@ class Runner(_BaseRunner):
         progress_bar = self.__progress_bar(total=len(data_loader), desc='Validate', position=1, leave=False, disable=(self.__verbose == Verbosity.NONE))
 
         for x, y in data_loader:
-            import time
-
-            time.sleep(0.1)
-
             output, y_hat = self.__forward(x)
-            result = self.__step(output, y_hat, y)
-            self.__record(result, mode='validate')
+            _ = self.__step(output, y_hat, y)
 
             progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
             progress_bar.update()
 
         metrics = self.__history.summary()
         self.__history.reset()
+
+        for metric, value in metrics.items():
+            self.__writer.add_scalar(f'{metric}/validate', value, self.__record_count['validate'])
+
+        self.__record_count['validate'] += 1
 
         progress_bar.set_postfix_str(self.__history.convert(metrics))
         progress_bar.refresh()
@@ -242,14 +242,18 @@ class Runner(_BaseRunner):
 
         for x, y in data_loader:
             output, y_hat = self.__forward(x)
-            result = self.__step(output, y_hat, y)
-            self.__record(result, mode='test')
+            _ = self.__step(output, y_hat, y)
 
             progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
             progress_bar.update()
 
         metrics = self.__history.summary()
         self.__history.reset()
+
+        for metric, value in metrics.items():
+            self.__writer.add_scalar(f'{metric}/test', value, self.__record_count['test'])
+
+        self.__record_count['test'] += 1
 
         progress_bar.set_postfix_str(self.__history.convert(metrics))
         progress_bar.refresh()
