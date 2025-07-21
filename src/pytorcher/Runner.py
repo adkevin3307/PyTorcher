@@ -1,7 +1,7 @@
 import copy
 from tqdm import tqdm
-from typing import Any
 from functools import partial
+from typing import Any, Literal
 from abc import ABC, abstractmethod
 
 import torch
@@ -9,26 +9,25 @@ import torch.nn as nn
 import torch.cuda as cuda
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from .utils import Verbosity, Callback
 
 
 class _History:
     def __init__(self, metrics: list[str] = ['loss', 'accuracy']) -> None:
-        self.__metrics = metrics
-
-        self.__history = {metric: [] for metric in self.__metrics}
+        self.__history = {metric: [] for metric in metrics}
 
     def __str__(self) -> str:
-        return self.convert(self.__getitem__(-1), prefix='', precision=3)
+        return self.convert(self.summary(), prefix='', precision=3)
 
     def __getitem__(self, idx: int) -> dict[str, int | float]:
-        results = {}
+        metrics = {}
 
-        for metric in self.__metrics:
-            results[metric] = self.__history[metric][idx]
+        for key, value in self.__history.items():
+            metrics[key] = value[idx]
 
-        return results
+        return metrics
 
     def convert(self, metrics: dict[str, int | float], prefix: str = '', precision: int = 3) -> str:
         return ', '.join([f'{f"{prefix}_" if len(prefix) > 0 else ""}{key}: {value:.{precision}f}' for key, value in metrics.items()])
@@ -41,10 +40,12 @@ class _History:
         self.__history[key].append(value)
 
     def summary(self) -> dict[str, int | float]:
-        for metric in self.__metrics:
-            self.__history[metric].append(sum(self.__history[metric]) / len(self.__history[metric]))
+        metrics = {}
 
-        return self.__getitem__(-1)
+        for key, value in self.__history.items():
+            metrics[key] = sum(value) / len(value)
+
+        return metrics
 
 
 class _BaseRunner(ABC):
@@ -67,7 +68,17 @@ class _BaseRunner(ABC):
 
 
 class Runner(_BaseRunner):
-    def __init__(self, net: nn.Module, optimizer: optim.Optimizer, criterion: nn.Module | nn.modules.loss._Loss, categorical: bool = True, verbose: Verbosity = Verbosity.DETAIL, elapsed_time: bool = True) -> None:
+    def __init__(
+        self,
+        net: nn.Module,
+        optimizer: optim.Optimizer,
+        criterion: nn.Module | nn.modules.loss._Loss,
+        categorical: bool = True,
+        verbose: Verbosity = Verbosity.DETAIL,
+        elapsed_time: bool = True,
+        checkpoints: str = 'checkpoints',
+    ) -> None:
+
         super(Runner, self).__init__()
 
         self.__net = net
@@ -81,6 +92,8 @@ class Runner(_BaseRunner):
         self.__metrics = ['loss'] + (['accuracy'] if self.__categorical else [])
         self.__history = _History(metrics=self.__metrics)
 
+        self.__writer = SummaryWriter(log_dir=checkpoints)
+
         self.__progress_bar = partial(tqdm, ascii=' =', bar_format='{desc}, [{bar:20}] {percentage:6.2f}%{postfix}' + (' ({elapsed_s:.3f} secs)' if elapsed_time else ''))
 
         self.__net = self.__net.to(self.device)
@@ -93,7 +106,7 @@ class Runner(_BaseRunner):
 
         return output, y_hat
 
-    def __step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def __step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> dict[str, torch.Tensor]:
         output = output.to(self.device)
         y_hat = y_hat.to(self.device)
         y = y.to(self.device)
@@ -101,23 +114,25 @@ class Runner(_BaseRunner):
         try:
             result = self.step(output, y_hat, y)
 
-        except NotImplementedError:
-            result = []
+        except Exception:
+            result = {}
 
             running_loss = self.__criterion.forward(output, y)
-            self.__history.log('loss', running_loss.item())
-            result.append(running_loss)
+            result['loss'] = running_loss
 
             if self.__categorical:
                 running_accuracy = torch.sum(y_hat == y) / torch.numel(y)
-                self.__history.log('accuracy', running_accuracy.item())
-                result.append(running_accuracy)
-
-            result = tuple(result)
+                result['accuracy'] = running_accuracy
 
         return result
 
-    def step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def __record(self, result: dict[str, torch.Tensor], mode: Literal['train', 'validate', 'test']) -> None:
+        for metric, value in result.items():
+            self.__history.log(metric, value.item())
+
+            self.__writer.add_scalar(f'{metric}/{mode}', value.item())
+
+    def step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> dict[str, torch.Tensor]:
         raise NotImplementedError('step not implemented')
 
     def train(self, epochs: int, data_loader: DataLoader, valid_loader: DataLoader | None = None, callbacks: list[Callback] | None = None) -> None:
@@ -131,10 +146,11 @@ class Runner(_BaseRunner):
 
             for x, y in data_loader:
                 output, y_hat = self.__forward(x)
-                running_loss, *_ = self.__step(output, y_hat, y)
+                result = self.__step(output, y_hat, y)
+                self.__record(result, mode='train')
 
                 self.__optimizer.zero_grad()
-                running_loss.backward()
+                result['loss'].backward()
                 self.__optimizer.step()
 
                 batch_progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
@@ -202,7 +218,8 @@ class Runner(_BaseRunner):
             time.sleep(0.1)
 
             output, y_hat = self.__forward(x)
-            _ = self.__step(output, y_hat, y)
+            result = self.__step(output, y_hat, y)
+            self.__record(result, mode='validate')
 
             progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
             progress_bar.update()
@@ -223,7 +240,8 @@ class Runner(_BaseRunner):
 
         for x, y in data_loader:
             output, y_hat = self.__forward(x)
-            _ = self.__step(output, y_hat, y)
+            result = self.__step(output, y_hat, y)
+            self.__record(result, mode='test')
 
             progress_bar.set_postfix_str(self.__history.convert(self.__history[-1]))
             progress_bar.update()
