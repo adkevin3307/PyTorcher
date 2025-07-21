@@ -93,6 +93,7 @@ class Runner(_BaseRunner):
         self.__history = _History(metrics=self.__metrics)
 
         self.__writer = SummaryWriter(log_dir=checkpoints)
+        self.__record_count = {'train': 0, 'validate': 0, 'test': 0}
 
         self.__progress_bar = partial(tqdm, ascii=' =', bar_format='{desc}, [{bar:20}] {percentage:6.2f}%{postfix}' + (' ({elapsed_s:.3f} secs)' if elapsed_time else ''))
 
@@ -130,7 +131,8 @@ class Runner(_BaseRunner):
         for metric, value in result.items():
             self.__history.log(metric, value.item())
 
-            self.__writer.add_scalar(f'{metric}/{mode}', value.item())
+            self.__writer.add_scalar(f'{metric}/{mode}', value.item(), self.__record_count[mode])
+            self.__record_count[mode] += 1
 
     def step(self, output: torch.Tensor, y_hat: torch.Tensor, y: torch.Tensor) -> dict[str, torch.Tensor]:
         raise NotImplementedError('step not implemented')
