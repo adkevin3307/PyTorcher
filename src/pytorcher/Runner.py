@@ -71,8 +71,8 @@ class Runner(_BaseRunner):
     def __init__(
         self,
         net: nn.Module,
-        optimizer: optim.Optimizer,
-        criterion: nn.Module | nn.modules.loss._Loss,
+        optimizer: optim.Optimizer | None,
+        criterion: nn.Module | nn.modules.loss._Loss | None,
         categorical: bool = True,
         verbose: Verbosity = Verbosity.DETAIL,
         elapsed_time: bool = True,
@@ -116,6 +116,8 @@ class Runner(_BaseRunner):
             result = self.step(output, y_hat, y)
 
         except Exception:
+            assert self.__criterion is not None
+
             result = {}
 
             running_loss = self.__criterion.forward(output, y)
@@ -134,6 +136,8 @@ class Runner(_BaseRunner):
         raise NotImplementedError('step not implemented')
 
     def train(self, epochs: int, data_loader: DataLoader, valid_loader: DataLoader | None = None, callbacks: list[Callback] | None = None) -> None:
+        assert self.__optimizer is not None
+
         epoch_length = len(str(epochs))
         epoch_progress_bar = self.__progress_bar(total=epochs, desc=f'Epochs: {0:>{epoch_length}} / {epochs}', position=0, disable=(self.__verbose != Verbosity.GENERAL))
 
@@ -302,20 +306,20 @@ class Runner(_BaseRunner):
 
     @property
     @torch.no_grad()
-    def optimizer(self) -> optim.Optimizer:
+    def optimizer(self) -> optim.Optimizer | None:
         return self.__optimizer
 
     @optimizer.setter
     @torch.no_grad()
-    def optimizer(self, value: optim.Optimizer) -> None:
+    def optimizer(self, value: optim.Optimizer | None) -> None:
         self.__optimizer = value
 
     @property
     @torch.no_grad()
-    def criterion(self) -> nn.Module | nn.modules.loss._Loss:
+    def criterion(self) -> nn.Module | nn.modules.loss._Loss | None:
         return self.__criterion
 
     @criterion.setter
     @torch.no_grad()
-    def criterion(self, value: nn.Module | nn.modules.loss._Loss) -> None:
+    def criterion(self, value: nn.Module | nn.modules.loss._Loss | None) -> None:
         self.__criterion = value
