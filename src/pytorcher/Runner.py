@@ -71,8 +71,8 @@ class Runner(_BaseRunner):
     def __init__(
         self,
         net: nn.Module,
-        optimizer: optim.Optimizer | None,
-        criterion: nn.Module | nn.modules.loss._Loss | None,
+        optimizer: optim.Optimizer | None = None,
+        criterion: nn.Module | nn.modules.loss._Loss | None = None,
         categorical: bool = True,
         verbose: Verbosity = Verbosity.DETAIL,
         elapsed_time: bool = True,
