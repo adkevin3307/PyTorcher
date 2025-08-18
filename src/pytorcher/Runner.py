@@ -192,7 +192,7 @@ class Runner(_BaseRunner):
                 stop_iteration = False
 
                 for callback in callbacks:
-                    if (epoch + 1) % callback.interval == 0 or (epoch + 1 == epochs and callback.last):
+                    if (callback.interval > 0 and (epoch + 1) % callback.interval == 0) or (epoch + 1 == epochs and callback.last):
                         try:
                             retval = callback(**{key: value for key, value in locals().items() if key not in exclude} | {'runner': self})
 
