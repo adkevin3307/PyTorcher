@@ -76,7 +76,7 @@ class Runner(_BaseRunner):
         categorical: bool = True,
         verbose: Verbosity = Verbosity.DETAIL,
         elapsed_time: bool = True,
-        checkpoints: str = 'checkpoints',
+        checkpoints: str | None = 'checkpoints',
     ) -> None:
 
         super(Runner, self).__init__()
@@ -92,7 +92,7 @@ class Runner(_BaseRunner):
         self.__metrics = ['loss'] + (['accuracy'] if self.__categorical else [])
         self.__history = _History(metrics=self.__metrics)
 
-        self.__writer = SummaryWriter(log_dir=checkpoints)
+        self.__writer = SummaryWriter(log_dir=checkpoints) if checkpoints is not None else None
         self.__record_count = {'train': 0, 'validate': 0, 'test': 0}
 
         self.__progress_bar = partial(tqdm, ascii=' =', bar_format='{desc}, [{bar:20}] {percentage:6.2f}%{postfix}' + (' ({elapsed_s:.3f} secs)' if elapsed_time else ''))
@@ -160,8 +160,9 @@ class Runner(_BaseRunner):
             metrics = self.__history.summary()
             self.__history.reset()
 
-            for metric, value in metrics.items():
-                self.__writer.add_scalar(f'{metric}/train', value, self.__record_count['train'])
+            if self.__writer is not None:
+                for metric, value in metrics.items():
+                    self.__writer.add_scalar(f'{metric}/train', value, self.__record_count['train'])
 
             self.__record_count['train'] += 1
 
@@ -228,8 +229,9 @@ class Runner(_BaseRunner):
         metrics = self.__history.summary()
         self.__history.reset()
 
-        for metric, value in metrics.items():
-            self.__writer.add_scalar(f'{metric}/validate', value, self.__record_count['validate'])
+        if self.__writer is not None:
+            for metric, value in metrics.items():
+                self.__writer.add_scalar(f'{metric}/validate', value, self.__record_count['validate'])
 
         self.__record_count['validate'] += 1
 
@@ -254,8 +256,9 @@ class Runner(_BaseRunner):
         metrics = self.__history.summary()
         self.__history.reset()
 
-        for metric, value in metrics.items():
-            self.__writer.add_scalar(f'{metric}/test', value, self.__record_count['test'])
+        if self.__writer is not None:
+            for metric, value in metrics.items():
+                self.__writer.add_scalar(f'{metric}/test', value, self.__record_count['test'])
 
         self.__record_count['test'] += 1
 
