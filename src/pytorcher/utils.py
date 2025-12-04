@@ -20,7 +20,7 @@ def fix_seed(seed: int = 0) -> None:
     cudnn.deterministic = True
 
 
-def load_data(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: int = -1) -> DataLoader:
+def load_data(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: int = 0) -> DataLoader:
     if num_workers == -1:
         num_workers = len(os.sched_getaffinity(0))
 
